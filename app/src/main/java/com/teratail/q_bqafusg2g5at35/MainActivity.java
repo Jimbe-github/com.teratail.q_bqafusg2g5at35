@@ -55,7 +55,7 @@ public class MainActivity extends AppCompatActivity {
   }
 
   private void discoverDevices(UsbManager manager, PendingIntent pi, TextView textView) {
-    textView.append("== discoverDevices ==");
+    textView.append("== discoverDevices ==\n");
 
     Map<String, UsbDevice> map = manager.getDeviceList();
     if(map == null) return;
