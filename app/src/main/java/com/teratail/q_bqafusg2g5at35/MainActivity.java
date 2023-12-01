@@ -11,7 +11,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.lifecycle.*;
 
 import java.util.*;
-import java.util.function.Consumer;
+import java.util.function.*;
 
 public class MainActivity extends AppCompatActivity {
   private Logger logger;
@@ -44,37 +44,13 @@ public class MainActivity extends AppCompatActivity {
       }
     };
 
-    UsbManager manager = (UsbManager)getSystemService(Context.USB_SERVICE);
-
-    UsbPermissionReceiver usbPermissionReceiver = new UsbPermissionReceiver(device -> showCardInfo(device, manager));
-    PendingIntent pi = usbPermissionReceiver.getPendingIntent();
-    getLifecycle().addObserver(usbPermissionReceiver);
-    getLifecycle().addObserver(new UsbDeviceReceiver(() -> discoverDevices(manager, pi, textView)));
-
-    discoverDevices(manager, pi, textView);
+    new UsbDeviceManager(this, getLifecycle(),
+            (vendarId, productId) -> vendarId == 0x054c && productId == 0x06c3,
+            this::showCardInfo
+    );
   }
 
-  private void discoverDevices(UsbManager manager, PendingIntent pi, TextView textView) {
-    textView.append("== discoverDevices ==\n");
-
-    Map<String, UsbDevice> map = manager.getDeviceList();
-    if(map == null) return;
-
-    UsbDevice rcs380 = null;
-    for(UsbDevice device : map.values()) {
-      if(device.getVendorId() == 0x054c && device.getProductId() == 0x06c3) {
-        rcs380 = device;
-        break;
-      }
-    }
-    if(rcs380 == null || manager.hasPermission(rcs380)) {
-      showCardInfo(rcs380, manager);
-    } else {
-      manager.requestPermission(rcs380, pi);
-    }
-  }
-
-  private void showCardInfo(UsbDevice device, UsbManager manager) {
+  private void showCardInfo(UsbManager manager, UsbDevice device) {
     if(device == null) return;
     if(manager == null) throw new NullPointerException("manager");
     try(Device rcs380 = new Device(new Chipset(new Transport(manager, device), logger), logger)) {
@@ -91,62 +67,77 @@ public class MainActivity extends AppCompatActivity {
       logger.error(Arrays.toString(e.getStackTrace()));
     }
   }
+}
 
-  private class UsbPermissionReceiver extends BroadcastReceiver implements DefaultLifecycleObserver {
-    private final String ACTION_USB_PERMISSION = UsbPermissionReceiver.class.getCanonicalName();
-    private final Consumer<UsbDevice> listener;
+class UsbDeviceManager {
+  private static final String ACTION_USB_PERMISSION = UsbDeviceManager.class.getCanonicalName();
 
-    UsbPermissionReceiver(Consumer<UsbDevice> listener) {
-      this.listener = listener;
+  private final BiFunction<Integer,Integer,Boolean> selector;
+  private final BiConsumer<UsbManager,UsbDevice> action;
+  private final UsbManager manager;
 
-      IntentFilter filter = new IntentFilter(ACTION_USB_PERMISSION);
-      registerReceiver(this, filter);
-    }
-    PendingIntent getPendingIntent() {
-      return PendingIntent.getBroadcast(MainActivity.this, 0,
-              new Intent(ACTION_USB_PERMISSION),
-              PendingIntent.FLAG_MUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-    }
-    @Override
-    public void onReceive(Context context, Intent intent) {
-      if(intent.getAction().equals(ACTION_USB_PERMISSION)) {
-        if(intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-          UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-          listener.accept(device);
-        } else {
-          logger.error("Permission denied");
+  UsbDeviceManager(Context context, Lifecycle lifecycle, BiFunction<Integer,Integer,Boolean> selector, BiConsumer<UsbManager, UsbDevice> action) {
+    this.selector = selector;
+    this.action = action;
+    this.manager = (UsbManager)context.getSystemService(Context.USB_SERVICE);
+
+    UsbBroadcastReceiver revceiver = new UsbBroadcastReceiver();
+    lifecycle.addObserver(new DefaultLifecycleObserver() {
+      @Override
+      public void onDestroy(@NonNull LifecycleOwner owner) {
+        context.unregisterReceiver(revceiver);
+      }
+    });
+    context.registerReceiver(revceiver, revceiver.getIntentFilter());
+
+    //USB接続済みかもしれない?
+    discoverDevices(context);
+  }
+
+  void discoverDevices(Context context) {
+    Map<String, UsbDevice> map = manager.getDeviceList();
+    if(map != null) {
+      for(UsbDevice device : map.values()) {
+        if(selector.apply(device.getVendorId(), device.getProductId())) {
+          if(manager.hasPermission(device)) {
+            action.accept(manager, device); //有った&パーミッションも有る
+          } else {
+            manager.requestPermission(device, //パーミッションを得てから
+                    PendingIntent.getBroadcast(context, 0, new Intent(ACTION_USB_PERMISSION),
+                            PendingIntent.FLAG_MUTABLE | PendingIntent.FLAG_UPDATE_CURRENT));
+          }
+          return;
         }
       }
     }
-    @Override
-    public void onDestroy(@NonNull LifecycleOwner owner) {
-      unregisterReceiver(this);
-    }
+    action.accept(manager, null); //無かった
   }
 
-  private class UsbDeviceReceiver extends BroadcastReceiver implements DefaultLifecycleObserver {
-    private final Runnable action;
-
-    UsbDeviceReceiver(Runnable action) {
-      this.action = action;
-
-      IntentFilter filter = new IntentFilter();
-      filter.addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED);
-      filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
-      registerReceiver(this, filter);
-    }
+  private class UsbBroadcastReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
+      if(intent.getAction().equals(ACTION_USB_PERMISSION)) {
+        action.accept(manager,
+                intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+                        ? intent.getParcelableExtra(UsbManager.EXTRA_DEVICE) //パーミッションが得られた
+                        : null); //得られなかった
+        return;
+      }
+      //USB抜き差し
       switch(intent.getAction()) {
         case UsbManager.ACTION_USB_DEVICE_ATTACHED:
         case UsbManager.ACTION_USB_DEVICE_DETACHED:
-          action.run();
+          discoverDevices(context);
           break;
       }
     }
-    @Override
-    public void onDestroy(@NonNull LifecycleOwner owner) {
-      unregisterReceiver(this);
+
+    IntentFilter getIntentFilter() {
+      IntentFilter filter = new IntentFilter();
+      filter.addAction(ACTION_USB_PERMISSION);
+      filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
+      filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
+      return filter;
     }
   }
 }
