@@ -8,53 +8,59 @@ import java.nio.*;
 import java.util.*;
 
 class Frame {
+  enum Type {
+    UNKNOWN, ACK, ERR, DATA;
+  }
+  private static final Frame ACK = new Frame(Bytes.of(0, 0, 0xff, 0, 0xff, 0), Type.ACK);
+  private static final Frame ERR = new Frame(Bytes.of(0, 0, 0xff, 0xff, 0xff), Type.ERR);
+
   final byte[] frame;
-  final String type;
+  final Type type;
 
-  Frame(byte code, byte[] data) {
-    byte[] cmd = Bytes.join(Bytes.of(0xd6, code), data);
-
+  static Frame createRequest(byte[] cmd) {
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
     try {
+      byte[] lens = Bytes.toLittleShort(cmd.length);
       baos.write(Bytes.of(0, 0, 0xff, 0xff, 0xff));
-      baos.write(lengthAndSum(cmd.length));
+      baos.write(lens);
+      baos.write(Bytes.checkSum(lens));
       baos.write(cmd);
-      baos.write(checkSum(cmd));
+      baos.write(Bytes.checkSum(cmd));
       baos.write(0);
     } catch(IOException ignore) {
       //no process
     }
-    this.frame = baos.toByteArray();
-    this.type = "";
+    return new Frame(baos.toByteArray(), Type.DATA);
   }
-  Frame(byte[] frame) {
+  static Frame createResponce(byte[] frame) {
+    if(Arrays.equals(frame, ACK.frame)) return ACK;
+    if(Arrays.equals(frame, ERR.frame)) return ERR;
+    Type type = Bytes.equals(frame, 3, 0xff, 0xff) ? Type.DATA : Type.UNKNOWN;
+    if(type == Type.DATA) {
+      if(Bytes.checkSum(frame, 5, 7+1) != 0) {
+        throw new IllegalStateException("length checksum error");
+      }
+      int len = Bytes.getShortInLittleEndianFrom(frame, 5);
+      if(Bytes.checkSum(frame, 8, 8+len+1) != 0) {
+        throw new IllegalStateException("data checksum error");
+      }
+    }
+    return new Frame(frame, type);
+  }
+  private Frame(byte[] frame, Type type) {
     this.frame = frame;
-    this.type = Bytes.allEquals(frame, 0, 0, 0xff, 0x00, 0xff, 0x00) ? "ack" :
-                Bytes.allEquals(frame, 0, 0, 0xff, 0xff, 0xff) ? "err" :
-                Bytes.equals(frame, 3, 0xff, 0xff) ? "data" : "???";
+    this.type = type;
   }
 
   boolean isAck() {
-    return type.equals("ack");
+    return type == Type.ACK;
   }
   boolean isData() {
-    return type.equals("data");
+    return type == Type.DATA;
   }
   byte[] getData() {
-    int len = Bytes.fromLittleShort(frame, 5);
-    if(len <= 0) return new byte[0];
+    int len = Bytes.getShortInLittleEndianFrom(frame, 5);
     return Arrays.copyOfRange(frame, 8, 8+len);
-  }
-
-  private byte[] lengthAndSum(int length) {
-    byte[] lens = Bytes.toLittleShort(length);
-    return Bytes.join(lens, Bytes.of(0x100 - (lens[0] + lens[1])));
-  }
-
-  private byte checkSum(byte[] cmd) {
-    byte sum = 0;
-    for(byte b : cmd) sum += b;
-    return (byte)(0x100 - sum);
   }
 }
 
@@ -190,8 +196,8 @@ class Chipset implements AutoCloseable {
     }
 
     set_command_type(1);
-    get_firmware_version(null);
-    get_pd_data_version();
+    //get_firmware_version(null);
+    //get_pd_data_version();
     switch_rf(false);
   }
 
@@ -203,18 +209,19 @@ class Chipset implements AutoCloseable {
   }
 
   byte[] send_command(CMD cmd, byte[] cmd_data) throws IOException {
-    byte[] frame = new Frame(cmd.code, cmd_data).frame;
-    log.log(/*DEBUG-1,*/Bytes.toString(frame));
-    transport.write(new Frame(cmd.code, cmd_data).frame);
+    //byte[] frame = new Frame(cmd.code, cmd_data).frame;
+    //log.log(/*DEBUG-1,*/Bytes.toString(frame));
+    byte[] cmd_frame = Bytes.join(Bytes.of(0xd6, cmd.code), cmd_data);
+    transport.write(Frame.createRequest(cmd_frame).frame);
 
-    Frame ack = new Frame(transport.read());
+    Frame ack = Frame.createResponce(transport.read());
     if(!ack.isAck()) {
-      log.error("expected ack but got " + ack.type);
+      log.error("expected ACK but got " + ack.type);
       return null;
     }
-    Frame rsp = new Frame(transport.read());
+    Frame rsp = Frame.createResponce(transport.read());
     if(!rsp.isData()) {
-      log.error("expected data but got " + rsp.type);
+      log.error("expected DATA but got " + rsp.type);
       return null;
     }
     byte[] data = rsp.getData();
@@ -236,15 +243,15 @@ class Chipset implements AutoCloseable {
     if(option != null && option != 60 && option != 61 && option != 0x80) throw new IllegalArgumentException("option=" + option);
     byte[] res = send_command(CMD.GetFirmwareVersion, option == null ? new byte[0] : Bytes.of(option));
     if(res == null) return 0;
-    Log.d("", String.format("firmware version %x.%02x}", res[1], res[0]));
-    return Bytes.fromLittleShort(res, 0);
+    Log.d("", String.format("firmware version %x.%02x", res[1], res[0]));
+    return Bytes.getShortInLittleEndianFrom(res, 0);
   }
 
   int get_pd_data_version() throws IOException {
     byte[] res = send_command(CMD.GetPDDataVersion, new byte[0]);
     if(res == null) return 0;
     Log.d("", String.format("package data format %x.%02x", res[1], res[0]));
-    return Bytes.fromLittleShort(res, 0);
+    return Bytes.getShortInLittleEndianFrom(res, 0);
   }
 
   void switch_rf(boolean on) throws IOException {

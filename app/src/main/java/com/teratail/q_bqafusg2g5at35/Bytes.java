@@ -29,7 +29,7 @@ public class Bytes {
             .array();
   }
 
-  static short fromLittleShort(byte[] bytes, int index) {
+  static short getShortInLittleEndianFrom(byte[] bytes, int index) {
     return ByteBuffer.wrap(bytes, index, 2)
             .order(ByteOrder.LITTLE_ENDIAN)
             .getShort();
@@ -40,6 +40,15 @@ public class Bytes {
     System.arraycopy(a, 0, c, 0, a.length);
     System.arraycopy(b, 0, c, a.length, b.length);
     return c;
+  }
+
+  static byte checkSum(byte[] bytes) {
+    return checkSum(bytes, 0, bytes.length);
+  }
+  static byte checkSum(byte[] bytes, int start, int endExclude) {
+    byte sum = 0;
+    for(int i=start; i<endExclude; i++) sum += bytes[i];
+    return (byte)(~sum + 1);
   }
 
   static String toString(byte[] bytes) {
