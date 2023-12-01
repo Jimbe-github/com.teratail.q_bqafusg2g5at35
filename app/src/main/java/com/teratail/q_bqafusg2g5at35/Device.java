@@ -67,6 +67,7 @@ class Frame {
 class Transport implements AutoCloseable {
   private final UsbDeviceConnection con;
   private final UsbEndpoint in, out;
+  private Logger log;
 
   Transport(UsbManager manager, UsbDevice device) throws IOException {
     con = manager.openDevice(device);
@@ -92,7 +93,12 @@ class Transport implements AutoCloseable {
     this.out = out;
   }
 
+  void setLogger(Logger log) {
+    this.log = log;
+  }
+
   void write(byte[] bytes) throws IOException {
+    if(log != null) log.debug(">>>> " + Bytes.toString(bytes));
     if(con.bulkTransfer(out, bytes, bytes.length, 100) != bytes.length) throw new IOException("send error");
   }
 
@@ -103,6 +109,7 @@ class Transport implements AutoCloseable {
     byte[] buffer = new byte[256+11];
     int len = con.bulkTransfer(in, buffer, buffer.length, timeout); //timeout=[ms]
     if(len < 0) throw new IOException("receive error: len=" + len);
+    if(log != null) log.debug("<<<< " + Bytes.toString(buffer, 0, len));
     return Arrays.copyOfRange(buffer, 0, len);
   }
 
@@ -180,9 +187,11 @@ class Chipset implements AutoCloseable {
   private final Transport transport;
   private final Logger log;
 
-  Chipset(Transport transport, Logger logger) throws IOException {
+  Chipset(Transport transport, Logger log) throws IOException {
     this.transport = transport;
-    this.log = logger;
+    this.log = log;
+
+    transport.setLogger(log);
 
     transport.write(Chipset.ACK); //通信の途中だったかも知れないので送ってみる
     try {
@@ -209,10 +218,8 @@ class Chipset implements AutoCloseable {
   }
 
   byte[] send_command(CMD cmd, byte[] cmd_data) throws IOException {
-    //byte[] frame = new Frame(cmd.code, cmd_data).frame;
-    //log.log(/*DEBUG-1,*/Bytes.toString(frame));
-    byte[] cmd_frame = Bytes.join(Bytes.of(0xd6, cmd.code), cmd_data);
-    transport.write(Frame.createRequest(cmd_frame).frame);
+    byte[] req = Bytes.join(Bytes.of(0xd6, cmd.code), cmd_data);
+    transport.write(Frame.createRequest(req).frame);
 
     Frame ack = Frame.createResponce(transport.read());
     if(!ack.isAck()) {
@@ -357,12 +364,13 @@ public class Device implements AutoCloseable {
   private final Logger log;
   final String chipsetName;
 
-  Device(Chipset chipset, Logger logger) throws IOException {
-    this.chipset = chipset;
+  Device(Transport transport, Logger logger) throws IOException {
+    this.chipset = new Chipset(transport, logger);
     this.log = logger;
 
     int firmver = chipset.get_firmware_version(null);
     chipsetName = String.format("NFC Port-100 v%x.%02x", firmver>>8, firmver&0xff);
+    log.log(chipsetName);
   }
 
   @Override

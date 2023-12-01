@@ -53,7 +53,7 @@ public class MainActivity extends AppCompatActivity {
   private void showCardInfo(UsbManager manager, UsbDevice device) {
     if(device == null) return;
     if(manager == null) throw new NullPointerException("manager");
-    try(Device rcs380 = new Device(new Chipset(new Transport(manager, device), logger), logger)) {
+    try(Device rcs380 = new Device(new Transport(manager, device), logger)) {
       byte[] data = rcs380.sense_ttf("212F");
       if(data == null) {
         logger.log("!!no data!!");
